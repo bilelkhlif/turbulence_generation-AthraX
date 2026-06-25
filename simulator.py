@@ -35,7 +35,7 @@ class Simulator(nn.Module):
         self.device = torch.device(device)
         self.Dr0 = torch.tensor(Dr0).to(self.device,dtype=torch.float32)
         self.mapping = _P2S()
-        self.mapping.load_state_dict(torch.load(os.path.join(data_path,'P2S_model.pt')))
+        self.mapping.load_state_dict(torch.load(os.path.join(data_path,'P2S_model.pt'), map_location='cpu'))
         self.dict_psf = np.load(os.path.join(data_path,'dictionary.npy'), allow_pickle = True)
         self.mu = torch.tensor(self.dict_psf.item()['mu']).reshape((1,1,33,33)).to(self.device,dtype=torch.float32)
         self.dict_psf = torch.tensor(self.dict_psf.item()['dictionary'][:100,:]).reshape((100,1,33,33))
