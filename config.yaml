@@ -8,7 +8,12 @@
 # and the auto-generated *.npy correlation matrices).
 data_path: "./data"
 
-# Where the VisDrone-VID valset will be extracted.
+# Where the VisDrone-DET-val image set will be extracted (auto-downloaded).
+# 548 images, ~70 MB — pulled from the public Ultralytics mirror.
+dataset_det_path: "./dataset/visdrone_det_val"
+
+# Where the VisDrone-VID-val video set will be extracted.
+# Requires manual upload to Google Drive (see run.sh for instructions).
 # The download script populates this with sequence sub-folders.
 dataset_path: "./dataset/visdrone_vid_val"
 

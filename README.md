@@ -4,17 +4,31 @@
 
 ## Run on Vast.ai
 
-This section covers running the full video pipeline fully headlessly on a [Vast.ai](https://vast.ai) GPU instance from scratch.
+This section covers running the full pipeline headlessly on a [Vast.ai](https://vast.ai) GPU instance from scratch.
 
 ### What it does
 
-The pipeline downloads the **VisDrone2019-VID validation set** (Task 2 — video sequences), selects a **diverse 30% subset** of clips using annotation metadata, applies atmospheric turbulence to every selected clip frame-by-frame, and saves the output videos to your configured output path (ready for rclone sync to Google Drive or similar).
+The pipeline processes **two VisDrone datasets** and applies atmospheric turbulence to each:
+
+| Dataset | Type | Download | Size |
+|---------|------|----------|------|
+| VisDrone2019-DET-val | 548 images | **Automatic** (public Ultralytics mirror) | ~70 MB |
+| VisDrone2019-VID-val | 48 video sequences | **Manual upload** to Google Drive, then pulled via rclone | ~1.49 GB |
+
+- **Images** are processed individually by `run_batch.py` → saved to `output_path/images/`
+- **Videos**: a diverse 30% clip subset is selected, then each clip is processed frame-by-frame via `apply_turbulence_to_video.py` → saved to `output_path/videos/`
 
 ### Dataset
 
-- **VisDrone2019-VID valset** — 48 drone-captured video sequences (~1.49 GB zip)
-- Official Google Drive link from [VisDrone/VisDrone-Dataset](https://github.com/VisDrone/VisDrone-Dataset)
-- The diverse 30% subset (~14 clips) is selected automatically — see [Diversity selection](#diversity-selection) below.
+#### Images (automatic)
+- **VisDrone2019-DET-val** — 548 drone-captured images, ~70 MB
+- Downloaded automatically from the public [Ultralytics mirror](https://github.com/ultralytics/assets/releases/download/v0.0.0/VisDrone2019-DET-val.zip) — no authentication required
+
+#### Videos (manual upload required)
+- **VisDrone2019-VID-val** — 48 video sequences, ~1.49 GB
+- The official Google Drive link is access-restricted and **cannot be downloaded programmatically**
+- You must manually download and upload it once — `run.sh` guides you through this
+- The diverse 30% subset (~14 clips) is selected automatically — see [Diversity selection](#diversity-selection) below
 
 ### 1. Rent an instance
 
@@ -48,10 +62,12 @@ mkdir -p data
 Open `config.yaml` to adjust turbulence strength, output path, or clip fraction:
 
 ```yaml
-output_path:      "./outputs"        # ← point to rclone mount if desired
-D_over_r0:        2.0                # turbulence strength
-subset_fraction:  0.30               # fraction of clips to process
-img_size:         256                # internal simulator resolution
+dataset_det_path: "./dataset/visdrone_det_val"  # image dataset (auto-downloaded)
+dataset_path:     "./dataset/visdrone_vid_val"  # video dataset (manual upload)
+output_path:      "./outputs"                   # ← point to rclone mount if desired
+D_over_r0:        2.0                           # turbulence strength
+subset_fraction:  0.30                          # fraction of video clips to process
+img_size:         256                           # internal simulator resolution
 device:           "cuda"
 ```
 
@@ -61,31 +77,82 @@ device:           "cuda"
 bash run.sh
 ```
 
-That single command runs all five steps in order:
+That single command runs all six steps in order:
 
 | Step | What happens |
 |------|-------------|
 | 1 | Installs PyTorch (CUDA build auto-detected) + all other dependencies |
 | 2 | Checks that `P2S_model.pt` and `dictionary.npy` are present |
-| 3 | Downloads VisDrone2019-VID valset (~1.49 GB) via Google Drive |
-| 4 | Parses annotations and selects a diverse 30% clip subset |
-| 5 | Applies turbulence to each selected clip; saves to `outputs/` |
+| 3a | Downloads VisDrone2019-DET-val images automatically (~70 MB, public mirror) |
+| 3b | Checks `gdrive:visdrone/VisDrone2019-VID-val.zip` and pulls via rclone if found |
+| 4 | Parses annotations and selects a diverse 30% video clip subset |
+| 5 | Applies turbulence to images (per-image) **and** video clips (per-frame) |
+| 6 | Saves all outputs to `outputs/images/` and `outputs/videos/` |
 
-A timing summary CSV is written to `outputs/results_summary.csv`.
+#### First run — video dataset not yet uploaded
+
+If the VID-val zip is not in your Google Drive, step 3b prints:
+
+```
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  VisDrone2019-VID-val NOT FOUND in gdrive:visdrone/                 │
+  │                                                                      │
+  │  1. Go to: https://github.com/VisDrone/VisDrone-Dataset             │
+  │     → Task 2 (Multi-Object Tracking) → Val → Google Drive link      │
+  │     Download: VisDrone2019-VID-val.zip  (~1.49 GB)                  │
+  │                                                                      │
+  │  2. Upload the zip to your Google Drive in a folder called:         │
+  │       visdrone/                                                      │
+  │     Final path in Drive:  gdrive:visdrone/VisDrone2019-VID-val.zip  │
+  │                                                                      │
+  │  3. Re-run:  bash run.sh                                            │
+  └──────────────────────────────────────────────────────────────────────┘
+```
+
+The pipeline will still process the **image dataset** and continue. Once you upload the zip and re-run, the video pipeline runs automatically.
+
+#### rclone setup (one-time)
+
+If rclone is not yet configured for your Google Drive:
+
+```bash
+# Install rclone
+curl https://rclone.org/install.sh | sudo bash
+
+# Configure a remote called "gdrive"
+rclone config
+# → choose "n" (new remote) → name it "gdrive" → type "drive" → follow OAuth prompts
+```
 
 ### Flags
 
 ```bash
-bash run.sh --skip-install   # skip pip install (env already set up)
-bash run.sh --skip-dataset   # skip VisDrone download (already extracted)
-bash run.sh --skip-select    # skip diversity selection (manifest already exists)
-bash run.sh --config my.yaml # use a different config file
+bash run.sh --skip-install          # skip pip install (env already set up)
+bash run.sh --skip-dataset          # skip all dataset downloads (already extracted)
+bash run.sh --skip-select           # skip diversity selection (manifest already exists)
+bash run.sh --images-only           # only run the image pipeline
+bash run.sh --videos-only           # only run the video pipeline
+bash run.sh --config my.yaml        # use a different config file
 ```
 
 ### Fast re-runs (after first successful run)
 
 ```bash
 bash run.sh --skip-install --skip-dataset --skip-select
+```
+
+### Output structure
+
+```
+outputs/
+├── images/
+│   ├── 0000001_00000_d_0000001_turbulence.jpg   # one per DET-val image
+│   ├── …
+│   └── results_summary.csv
+└── videos/
+    ├── uav0000013_00000_v_turbulence.mp4         # one per selected VID-val clip
+    ├── …
+    └── results_summary.csv
 ```
 
 ### Diversity selection
