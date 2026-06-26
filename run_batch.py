@@ -3,16 +3,23 @@ run_batch.py — headless batch inference entry point.
 
 Reads all settings from config.yaml, then processes BOTH:
 
-  • Images  (visdrone_det_val)  → turbulence applied per image via the
-    Simulator directly; outputs saved to  output_path/images/
-    Each image gets a unique random parameter set (D_over_r0, L, corr,
-    scale).  A .json label file and master results_summary.csv are written.
-    img_size is fixed at 1024 for all images.
+  • Images  (visdrone_det_val)  → all 548 images processed via the Simulator,
+    cycling evenly through 5 preset turbulence levels.
+    img_size=1024 for all images.
+    A .json label + master results_summary.csv are written.
+    Outputs → output_path/images/
 
-  • Videos  (visdrone_vid_val)  → ALL sequences processed frame-by-frame
-    via apply_turbulence_to_video.py; outputs saved to  output_path/videos/
-    No subset selection — every sequence folder in dataset_path/sequences/
-    is processed.
+  • Videos  (visdrone_vid_val)  → ALL sequences processed frame-by-frame via
+    apply_turbulence_to_video.py, one preset per clip (cycling through presets).
+    img_size=1024 for all videos.
+    Outputs → output_path/videos/
+
+Presets (realistic for aerial drone footage, D/r0 ≤ 1.5):
+    negligible  D/r0=0.2  L=500   corr=-0.1  scale=1.0
+    weak        D/r0=0.5  L=1000  corr=-0.1  scale=1.0
+    mild        D/r0=0.8  L=2000  corr=-0.1  scale=1.0
+    moderate    D/r0=1.2  L=3000  corr=-0.1  scale=1.0
+    strong      D/r0=1.5  L=3000  corr=0.5   scale=1.0
 
 Usage
 -----
@@ -24,7 +31,6 @@ import argparse
 import csv
 import json
 import os
-import random
 import subprocess
 import sys
 import time
@@ -38,19 +44,22 @@ import yaml
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from turbStats import tilt_mat, corr_mat
+# ── Fixed simulation resolution for both pipelines ───────────────────────────
+IMG_SIZE = 1024
 
-# ── Fixed image resolution (overrides config.yaml img_size for images) ────────
-IMAGE_IMG_SIZE = 1024
-
-# ── Random parameter ranges for image pipeline ────────────────────────────────
-DR0_RANGE   = (0.1, 3.0)
-L_RANGE     = (500.0, 5000.0)
-SCALE_RANGE = (0.5, 2.0)
-CORR_VALUES = [-0.1, 0.0, 0.5, 0.9]
-
-# ── D (aperture diameter) is fixed at 0.1 m throughout ───────────────────────
+# ── D (aperture diameter) fixed at 0.1 m throughout ─────────────────────────
 D_APERTURE = 0.1
+
+# ── Turbulence presets — realistic for aerial drone footage ──────────────────
+# (name, D_over_r0, L, corr, scale)
+# D/r0 never exceeds 1.5 — stays within the network's reliable range.
+PRESETS = [
+    ("negligible", 0.2,  500,  -0.1, 1.0),
+    ("weak",       0.5, 1000,  -0.1, 1.0),
+    ("mild",       0.8, 2000,  -0.1, 1.0),
+    ("moderate",   1.2, 3000,  -0.1, 1.0),
+    ("strong",     1.5, 3000,   0.5, 1.0),
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,111 +72,6 @@ def load_config(path: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Turbulence strength label
-# ─────────────────────────────────────────────────────────────────────────────
-
-def strength_label(Dr0: float) -> str:
-    if Dr0 < 1.0:
-        return "light"
-    elif Dr0 <= 2.0:
-        return "moderate"
-    return "strong"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Matrix helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _corr_matrix_exists(data_path: str, corr: float) -> bool:
-    return os.path.isfile(os.path.join(data_path, f"R-corr_{corr}.npy"))
-
-
-def _tilt_matrix_path(data_path: str, img_size: int, Dr0: float) -> str:
-    return os.path.join(data_path, f"S_half-size_{img_size}-D_r0_{Dr0:.4f}.npy")
-
-
-def _tilt_matrix_exists(data_path: str, img_size: int, Dr0: float) -> bool:
-    return os.path.isfile(_tilt_matrix_path(data_path, img_size, Dr0))
-
-
-def precompute_all_corr_matrices(data_path: str) -> None:
-    """
-    Ensure all four PSF correlation matrices are cached before any image
-    is processed.  Only generates files that are not already on disk.
-    """
-    print(f"[images/setup] Pre-computing correlation matrices for {CORR_VALUES} …")
-    for corr in CORR_VALUES:
-        if _corr_matrix_exists(data_path, corr):
-            print(f"  R-corr_{corr}.npy  ✓ cached")
-        else:
-            print(f"  Generating R-corr_{corr}.npy  (~10 min first time) …")
-            corr_mat(corr, data_path)
-            print(f"  R-corr_{corr}.npy  done.")
-    print("[images/setup] All corr matrices ready.\n")
-
-
-def _ensure_tilt_matrix(data_path: str, img_size: int, Dr0: float,
-                         L: float) -> None:
-    """Generate the tilt matrix for (img_size, Dr0) if not cached."""
-    if not _tilt_matrix_exists(data_path, img_size, Dr0):
-        r0 = D_APERTURE / Dr0
-        tilt_mat(img_size, D_APERTURE, r0, L, data_path)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Live simulator parameter swap (mutate tensors in-place — no rebuild)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _swap_simulator_params(sim, Dr0: float, corr: float, scale: float,
-                            data_path: str, device: torch.device) -> None:
-    """
-    Update the Simulator's internal tensors for new (Dr0, corr, scale)
-    without rebuilding the whole object (avoids reloading P2S_model.pt
-    and dictionary.npy on every image).
-    """
-    # PSF correlation matrix
-    R_arr = np.load(os.path.join(data_path, f"R-corr_{corr}.npy"))
-    sim.R = torch.tensor(R_arr, dtype=torch.float32, device=device)
-
-    # Tilt matrix
-    tilt_file = _tilt_matrix_path(data_path, sim.img_size, Dr0)
-    d = np.load(tilt_file, allow_pickle=True)
-    sim.S_half = torch.tensor(d.item()["s_half"], dtype=torch.float32, device=device)
-    sim.const  = d.item()["const"]
-
-    # Scalar params
-    sim.Dr0   = torch.tensor(Dr0,   dtype=torch.float32, device=device)
-    sim.scale = scale
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Old single-combo precompute (still used by main() for video pipeline setup)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def precompute_matrices(img_size: int, D_over_r0: float, L: float,
-                        corr: float, data_path: str) -> None:
-    """Generate tilt and PSF matrices for a single combo if not cached."""
-    D  = D_APERTURE
-    r0 = D / D_over_r0
-
-    if not _corr_matrix_exists(data_path, corr):
-        print(f"[setup] Generating PSF correlation matrix R-corr_{corr}.npy")
-        print("        (can take ~10 min — only once per corr value)")
-        corr_mat(corr, data_path)
-        print("[setup] PSF matrix done.")
-    else:
-        print(f"[setup] PSF matrix for corr={corr} already cached.")
-
-    if not _tilt_matrix_exists(data_path, img_size, D_over_r0):
-        print(f"[setup] Generating tilt matrix for size={img_size}, D/r0={D_over_r0:.4f}")
-        print("        (can take a few minutes — only once per parameter set)")
-        tilt_mat(img_size, D, r0, L, data_path)
-        print("[setup] Tilt matrix done.")
-    else:
-        print(f"[setup] Tilt matrix for size={img_size}, D/r0={D_over_r0:.4f} already cached.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Image batch processing
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -175,33 +79,32 @@ def process_images(cfg: dict, output_path: Path) -> list:
     """
     Apply turbulence to every image in the DET-val dataset.
 
-    - img_size fixed at IMAGE_IMG_SIZE (1024) regardless of config.yaml.
-    - Each image receives a freshly sampled random parameter set:
-        D_over_r0 ~ Uniform[0.1, 3.0]
-        L         ~ Uniform[500, 5000]
-        corr      ~ choice([-0.1, 0.0, 0.5, 0.9])
-        scale     ~ Uniform[0.5, 2.0]
-    - A .json label file is written next to every output image.
-    - A master results_summary.csv with all parameters is written to
-      output_path/images/.
+    Presets are cycled evenly across all images (image i gets
+    PRESETS[i % len(PRESETS)]).  A fresh Simulator is built for each
+    distinct preset — no tensor swapping, no bulk precomputation.
+
+    Outputs:
+      • output_path/images/<name>_turbulence.<ext>   — degraded image
+      • output_path/images/<name>_turbulence.json    — per-image label
+      • output_path/images/results_summary.csv       — master CSV
     """
     from simulator import Simulator
+    from turbStats import tilt_mat
 
     det_path = Path(cfg.get("dataset_det_path", "./dataset/visdrone_det_val"))
     img_out  = output_path / "images"
     img_out.mkdir(parents=True, exist_ok=True)
 
-    # Locate image files — try det_path/images/ first, then root
     search_dir = det_path / "images" if (det_path / "images").exists() else det_path
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
     image_files = sorted(p for p in search_dir.iterdir() if p.suffix.lower() in exts)
 
     if not image_files:
-        print(f"[images] No images found in {search_dir} — skipping image batch.")
+        print(f"[images] No images found in {search_dir} — skipping.")
         return []
 
     print(f"[images] Found {len(image_files)} images in {search_dir}")
-    print(f"[images] Using fixed img_size={IMAGE_IMG_SIZE} for all images")
+    print(f"[images] img_size={IMG_SIZE}  cycling through {len(PRESETS)} presets")
 
     data_path  = str(Path(cfg["data_path"]))
     device_str = cfg.get("device", "cuda")
@@ -210,62 +113,49 @@ def process_images(cfg: dict, output_path: Path) -> list:
         device_str = "cpu"
     device = torch.device(device_str)
 
-    img_size = IMAGE_IMG_SIZE
-
-    # ── Step 1: Pre-compute ALL corr matrices before touching any image ───────
-    precompute_all_corr_matrices(data_path)
-
-    # ── Step 2: Build initial simulator with arbitrary starting params ────────
-    init_Dr0  = 1.0
-    init_corr = CORR_VALUES[0]
-    init_scale = 1.0
-
-    # Ensure tilt matrix exists for initial Dr0
-    _ensure_tilt_matrix(data_path, img_size, init_Dr0, L=3000.0)
-
-    simulator = Simulator(
-        Dr0=init_Dr0,
-        img_size=img_size,
-        corr=init_corr,
-        data_path=data_path,
-        device=device_str,
-        scale=init_scale,
-    ).to(device, dtype=torch.float32)
-    simulator.eval()
-
-    # ── Step 3: Process each image with its own random params ─────────────────
-    results = []
-    t_start = time.time()
+    # Build one Simulator per distinct preset and cache them.
+    # tilt_mat is called inside Simulator.__init__ via the .npy file;
+    # we pre-generate the file here exactly as demo.py does (once per preset).
+    print("[images] Building simulators for all presets …")
+    simulators = {}
+    for preset_name, Dr0, L, corr, scale in PRESETS:
+        r0 = D_APERTURE / Dr0
+        print(f"  preset='{preset_name}'  D/r0={Dr0}  L={L}  corr={corr}  scale={scale}")
+        # Generate tilt matrix if not already cached (same call as demo.py)
+        tilt_mat(IMG_SIZE, D_APERTURE, r0, L, data_path)
+        sim = Simulator(
+            Dr0=Dr0,
+            img_size=IMG_SIZE,
+            corr=corr,
+            data_path=data_path,
+            device=device_str,
+            scale=scale,
+        ).to(device, dtype=torch.float32)
+        sim.eval()
+        simulators[preset_name] = sim
+    print("[images] All simulators ready.\n")
 
     csv_fields = [
         "source_image", "output_image", "label_file",
-        "img_size", "D_over_r0", "r0", "L", "corr", "scale",
-        "turbulence_strength", "time_s", "status",
+        "preset", "img_size", "D_over_r0", "r0", "L", "corr", "scale",
+        "time_s", "status",
     ]
+    results = []
+    t_start = time.time()
 
     with torch.no_grad():
         for i, img_path in enumerate(image_files):
-            t0 = time.time()
-
-            # ── Sample random parameters for this image ───────────────────
-            Dr0   = round(random.uniform(*DR0_RANGE), 4)
-            L     = round(random.uniform(*L_RANGE), 2)
-            corr  = random.choice(CORR_VALUES)
-            scale = round(random.uniform(*SCALE_RANGE), 4)
-            r0    = round(D_APERTURE / Dr0, 6)
-            strength = strength_label(Dr0)
-
-            # Ensure tilt matrix for this Dr0/L combo exists (generates if needed)
-            _ensure_tilt_matrix(data_path, img_size, Dr0, L)
-
-            # Swap simulator internals in-place
-            _swap_simulator_params(simulator, Dr0, corr, scale, data_path, device)
+            # Cycle through presets evenly
+            preset_name, Dr0, L, corr, scale = PRESETS[i % len(PRESETS)]
+            r0 = round(D_APERTURE / Dr0, 6)
+            simulator = simulators[preset_name]
 
             out_name   = img_path.stem + "_turbulence" + img_path.suffix
             label_name = img_path.stem + "_turbulence.json"
             out_file   = img_out / out_name
             label_file = img_out / label_name
 
+            t0 = time.time()
             try:
                 frame_bgr = cv2.imread(str(img_path))
                 if frame_bgr is None:
@@ -274,7 +164,7 @@ def process_images(cfg: dict, output_path: Path) -> list:
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 src_h, src_w = frame_rgb.shape[:2]
 
-                frame_sq = cv2.resize(frame_rgb, (img_size, img_size),
+                frame_sq = cv2.resize(frame_rgb, (IMG_SIZE, IMG_SIZE),
                                       interpolation=cv2.INTER_LINEAR)
 
                 img_t = (torch.from_numpy(frame_sq)
@@ -289,23 +179,22 @@ def process_images(cfg: dict, output_path: Path) -> list:
                 out_np    = np.clip(out_np, 0.0, 1.0)
                 out_uint8 = (out_np * 255).astype(np.uint8)
 
-                if (img_size, img_size) != (src_h, src_w):
+                if (IMG_SIZE, IMG_SIZE) != (src_h, src_w):
                     out_uint8 = cv2.resize(out_uint8, (src_w, src_h),
                                            interpolation=cv2.INTER_LINEAR)
 
                 out_bgr = cv2.cvtColor(out_uint8, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(out_file), out_bgr)
 
-                # ── Write per-image JSON label ────────────────────────────
                 label = {
-                    "source_image":        img_path.name,
-                    "img_size":            img_size,
-                    "D_over_r0":           Dr0,
-                    "L":                   L,
-                    "corr":                corr,
-                    "scale":               scale,
-                    "r0":                  r0,
-                    "turbulence_strength": strength,
+                    "source_image": img_path.name,
+                    "preset":       preset_name,
+                    "img_size":     IMG_SIZE,
+                    "D_over_r0":    Dr0,
+                    "L":            float(L),
+                    "corr":         corr,
+                    "scale":        scale,
+                    "r0":           r0,
                 }
                 with open(label_file, "w") as lf:
                     json.dump(label, lf, indent=2)
@@ -314,38 +203,36 @@ def process_images(cfg: dict, output_path: Path) -> list:
                 status  = "ok"
 
             except Exception as exc:
-                elapsed   = time.time() - t0
-                status    = f"error({exc})"
-                out_name  = img_path.name
+                elapsed    = time.time() - t0
+                status     = f"error({exc})"
+                out_name   = img_path.name
                 label_name = ""
 
             results.append({
-                "source_image":        img_path.name,
-                "output_image":        out_name,
-                "label_file":          label_name,
-                "img_size":            img_size,
-                "D_over_r0":           Dr0,
-                "r0":                  r0,
-                "L":                   L,
-                "corr":                corr,
-                "scale":               scale,
-                "turbulence_strength": strength,
-                "time_s":              f"{elapsed:.2f}",
-                "status":              status,
+                "source_image": img_path.name,
+                "output_image": out_name,
+                "label_file":   label_name,
+                "preset":       preset_name,
+                "img_size":     IMG_SIZE,
+                "D_over_r0":    Dr0,
+                "r0":           r0,
+                "L":            float(L),
+                "corr":         corr,
+                "scale":        scale,
+                "time_s":       f"{elapsed:.2f}",
+                "status":       status,
             })
 
             if (i + 1) % 50 == 0 or (i + 1) == len(image_files):
                 ok = sum(1 for r in results if r["status"] == "ok")
                 print(f"  [{i+1}/{len(image_files)}] {ok} ok  "
-                      f"D/r0={Dr0:.3f}  L={L:.0f}  corr={corr}  "
-                      f"scale={scale:.2f}  ({strength})",
+                      f"preset='{preset_name}'  D/r0={Dr0}  L={L}  corr={corr}",
                       flush=True)
 
     total    = time.time() - t_start
     ok_count = sum(1 for r in results if r["status"] == "ok")
     print(f"[images] Done: {ok_count}/{len(results)} images in {total:.1f}s → {img_out}")
 
-    # ── Master CSV with all parameters ────────────────────────────────────────
     csv_path = img_out / "results_summary.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields)
@@ -366,17 +253,14 @@ def frames_to_video(seq_dir: Path, video_path: Path, fps: float = 30.0) -> bool:
     frames = sorted(p for p in seq_dir.iterdir() if p.suffix.lower() in exts)
     if not frames:
         return False
-
     first = cv2.imread(str(frames[0]))
     if first is None:
         return False
     h, w = first.shape[:2]
-
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(video_path), fourcc, fps, (w, h))
     if not writer.isOpened():
         return False
-
     for p in frames:
         frame = cv2.imread(str(p))
         if frame is not None:
@@ -388,9 +272,9 @@ def frames_to_video(seq_dir: Path, video_path: Path, fps: float = 30.0) -> bool:
 def process_videos(cfg: dict, output_path: Path) -> list:
     """
     Apply turbulence to ALL video sequences in the VID-val dataset.
-    Sequences are discovered directly from dataset_path/sequences/ —
-    no manifest file or subset selection involved.
-    Results are written to  output_path/videos/
+    Each clip gets one preset (cycling through PRESETS).
+    No mid-video parameter changes.
+    Outputs → output_path/videos/
     """
     import shutil
 
@@ -410,11 +294,7 @@ def process_videos(cfg: dict, output_path: Path) -> list:
         return []
 
     print(f"[videos] Processing ALL {len(all_clips)} sequences → {vid_out}")
-
-    scale   = float(cfg.get("scale", 1.0))
-    D       = D_APERTURE
-    min_sec = float(cfg.get("param_change_min_seconds", 1))
-    max_sec = float(cfg.get("param_change_max_seconds", 30))
+    print(f"[videos] One preset per clip, cycling through {len(PRESETS)} presets")
 
     tmp_dir = dataset_path.parent / "_tmp_videos"
     tmp_dir.mkdir(exist_ok=True)
@@ -424,12 +304,16 @@ def process_videos(cfg: dict, output_path: Path) -> list:
 
     for i, clip_name in enumerate(all_clips):
         seq_dir = dataset_path / "sequences" / clip_name
-
         if not seq_dir.exists():
             print(f"  [skip] Sequence folder not found: {seq_dir}")
             continue
 
-        print(f"\n[{i+1}/{len(all_clips)}] {clip_name}")
+        # Assign preset by cycling
+        preset_name, Dr0, L, corr, scale = PRESETS[i % len(PRESETS)]
+        r0 = D_APERTURE / Dr0
+
+        print(f"\n[{i+1}/{len(all_clips)}] {clip_name}  "
+              f"preset='{preset_name}'  D/r0={Dr0}  L={L}  corr={corr}")
 
         tmp_input = tmp_dir / f"{clip_name}.mp4"
         if not tmp_input.exists():
@@ -441,17 +325,20 @@ def process_videos(cfg: dict, output_path: Path) -> list:
         else:
             print(f"  Using existing temp video: {tmp_input}")
 
-        out_video = vid_out / f"{clip_name}_turbulence.mp4"
+        out_video = vid_out / f"{clip_name}_{preset_name}_turbulence.mp4"
 
         cmd = [
             sys.executable,
             str(SCRIPT_DIR / "apply_turbulence_to_video.py"),
-            "--input",   str(tmp_input),
-            "--output",  str(out_video),
-            "--D",       str(D),
-            "--scale",   str(scale),
-            "--param-change-min-seconds", str(min_sec),
-            "--param-change-max-seconds", str(max_sec),
+            "--input",      str(tmp_input),
+            "--output",     str(out_video),
+            "--D",          str(D_APERTURE),
+            "--r0",         str(r0),
+            "--L",          str(L),
+            "--corr",       str(corr),
+            "--scale",      str(scale),
+            "--img-size",   str(IMG_SIZE),
+            "--preset-name", preset_name,
         ]
 
         t0 = time.time()
@@ -462,6 +349,11 @@ def process_videos(cfg: dict, output_path: Path) -> list:
         status = "ok" if ret.returncode == 0 else f"error({ret.returncode})"
         results.append({
             "clip":    clip_name,
+            "preset":  preset_name,
+            "D_over_r0": Dr0,
+            "L":       float(L),
+            "corr":    corr,
+            "scale":   scale,
             "output":  out_video.name,
             "time_s":  f"{elapsed:.1f}",
             "status":  status,
@@ -477,7 +369,9 @@ def process_videos(cfg: dict, output_path: Path) -> list:
 
     csv_path = vid_out / "results_summary.csv"
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["clip", "output", "time_s", "status"])
+        writer = csv.DictWriter(
+            f, fieldnames=["clip", "preset", "D_over_r0", "L", "corr",
+                           "scale", "output", "time_s", "status"])
         writer.writeheader()
         writer.writerows(results)
     print(f"[videos] Summary → {csv_path}")
@@ -495,12 +389,13 @@ def main(cfg: dict, images_only: bool = False, videos_only: bool = False) -> Non
 
     device_str = cfg.get("device", "cuda")
     if device_str == "cuda" and not torch.cuda.is_available():
-        print("[warn] CUDA requested but not available — falling back to CPU.")
+        print("[warn] CUDA not available — falling back to CPU.")
         device_str = "cpu"
         cfg["device"] = device_str
     print(f"[info] Device: {device_str}")
-    print(f"[info] Image pipeline: img_size={IMAGE_IMG_SIZE}, random params per image")
-    print(f"[info] Video pipeline: img_size=1024, continuously varying params")
+    print(f"[info] img_size={IMG_SIZE} for both images and videos")
+    print(f"[info] {len(PRESETS)} presets: "
+          + "  ".join(f"{p[0]}(D/r0={p[1]})" for p in PRESETS))
 
     if not videos_only:
         print("\n" + "=" * 60)
