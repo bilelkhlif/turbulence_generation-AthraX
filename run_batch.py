@@ -264,13 +264,10 @@ def process_videos(cfg: dict, output_path: Path) -> list:
     print(f"[videos] Processing {len(selected_clips)} selected clips → {vid_out}")
 
     data_path = Path(cfg["data_path"])
-    D_over_r0 = float(cfg["D_over_r0"])
     scale     = float(cfg.get("scale", 1.0))
-    corr      = float(cfg.get("corr", -0.1))
-    L         = float(cfg.get("L", 3000.0))
-    img_size  = int(cfg.get("img_size", 256))
     D         = 0.1
-    r0        = D / D_over_r0
+    min_sec   = float(cfg.get("param_change_min_seconds", 1))
+    max_sec   = float(cfg.get("param_change_max_seconds", 30))
 
     tmp_dir = dataset_path.parent / "_tmp_videos"
     tmp_dir.mkdir(exist_ok=True)
@@ -300,17 +297,17 @@ def process_videos(cfg: dict, output_path: Path) -> list:
 
         out_video = vid_out / f"{clip_name}_turbulence.mp4"
 
+        # apply_turbulence_to_video.py handles img_size=1024, varying params
+        # internally — no need to pass D_over_r0 / corr / L / img_size here.
         cmd = [
             sys.executable,
             str(SCRIPT_DIR / "apply_turbulence_to_video.py"),
-            "--input",    str(tmp_input),
-            "--output",   str(out_video),
-            "--D",        str(D),
-            "--r0",       str(r0),
-            "--L",        str(L),
-            "--img_size", str(img_size),
-            "--corr",     str(corr),
-            "--scale",    str(scale),
+            "--input",   str(tmp_input),
+            "--output",  str(out_video),
+            "--D",       str(D),
+            "--scale",   str(scale),
+            "--param-change-min-seconds", str(min_sec),
+            "--param-change-max-seconds", str(max_sec),
         ]
 
         t0 = time.time()

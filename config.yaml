@@ -43,9 +43,22 @@ corr: -0.1
 L: 3000.0
 
 # ── Simulator resolution ──────────────────────────────────────────
-# Internal square resolution fed to the simulator.
+# Internal square resolution fed to the simulator for IMAGES.
 # Choices: 128, 256, 512, 1024.  Higher = better quality, slower.
 img_size: 256
+
+# Internal resolution for VIDEOS.  Hard-coded to 1024 in
+# apply_turbulence_to_video.py regardless of this value — kept here
+# for documentation and future override support.
+video_img_size: 1024
+
+# ── Varying turbulence (video only) ───────────────────────────────
+# The interval between parameter changes is drawn uniformly from
+# [param_change_min_seconds, param_change_max_seconds] each time.
+# At each boundary, new random values for D_over_r0, L, and corr are
+# selected and cosine-interpolated toward over the next interval.
+param_change_min_seconds: 1
+param_change_max_seconds: 30
 
 # ── Hardware ──────────────────────────────────────────────────────
 # "cuda" → use first available GPU.  "cpu" → CPU-only.
