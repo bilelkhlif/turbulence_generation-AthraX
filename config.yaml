@@ -28,25 +28,19 @@ output_path: "./outputs"
 # all sequences directly.
 subset_fraction: 1.0
 
-# ── Turbulence physics ─────────────────────────────────────────────
-# D/r0 ratio — primary turbulence strength dial.
-# Suggested range: 0.1 (barely visible) → 5.0 (severe).
+# ── Turbulence physics (reference values — not used at runtime) ────
+# The image pipeline samples these randomly per image.
+# The video pipeline varies them continuously per frame.
+# These values are kept here for documentation only.
 D_over_r0: 2.0
-
-# Scale multiplier on top of D/r0.  1.0 = neutral.
 scale: 1.0
-
-# PSF spatial correlation.  Options: -0.01, -0.1, -1.0, -5.0
-# Smaller magnitude (closer to 0) = more uniform blur.
 corr: -0.1
-
-# Propagation distance in metres (used only when pre-computing tilt matrix).
 L: 3000.0
 
 # ── Simulator resolution ──────────────────────────────────────────
 # Internal square resolution fed to the simulator for IMAGES.
-# Choices: 128, 256, 512, 1024.  Higher = better quality, slower.
-img_size: 256
+# Hard-coded to 1024 in run_batch.py regardless of this value.
+image_img_size: 1024
 
 # Internal resolution for VIDEOS.  Hard-coded to 1024 in
 # apply_turbulence_to_video.py regardless of this value — kept here
