@@ -6,9 +6,10 @@ Reads all settings from config.yaml, then processes BOTH:
   • Images  (visdrone_det_val)  → turbulence applied per image via the
     Simulator directly; outputs saved to  output_path/images/
 
-  • Videos  (visdrone_vid_val)  → diversity-selected clips processed
-    frame-by-frame via apply_turbulence_to_video.py; outputs saved to
-    output_path/videos/
+  • Videos  (visdrone_vid_val)  → ALL sequences processed frame-by-frame
+    via apply_turbulence_to_video.py; outputs saved to  output_path/videos/
+    No subset selection — every sequence folder in dataset_path/sequences/
+    is processed.
 
 Usage
 -----
@@ -18,7 +19,6 @@ Usage
 
 import argparse
 import csv
-import json
 import os
 import subprocess
 import sys
@@ -241,8 +241,9 @@ def frames_to_video(seq_dir: Path, video_path: Path, fps: float = 30.0) -> bool:
 
 def process_videos(cfg: dict, output_path: Path) -> list:
     """
-    Apply turbulence to every selected video clip in the VID-val dataset.
-    Clips are read from  dataset_path/sequences/  (as frame folders).
+    Apply turbulence to ALL video sequences in the VID-val dataset.
+    Sequences are discovered directly from dataset_path/sequences/ —
+    no manifest file or subset selection involved.
     Results are written to  output_path/videos/
     """
     import shutil
@@ -251,17 +252,19 @@ def process_videos(cfg: dict, output_path: Path) -> list:
     vid_out      = output_path / "videos"
     vid_out.mkdir(parents=True, exist_ok=True)
 
-    manifest_path = dataset_path.parent / "selected_clips.json"
-    if not manifest_path.exists():
-        print(f"[videos] Manifest not found: {manifest_path}")
-        print("         Run: python select_diverse_clips.py --dataset <path>")
+    seq_root = dataset_path / "sequences"
+    if not seq_root.exists():
+        print(f"[videos] Sequences directory not found: {seq_root}")
+        print("         Make sure the VID-val dataset was extracted correctly.")
         sys.exit(1)
 
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    # Collect all sequence sub-folders, sorted for reproducibility
+    all_clips = sorted(p.name for p in seq_root.iterdir() if p.is_dir())
+    if not all_clips:
+        print(f"[videos] No sequence folders found in {seq_root} — skipping.")
+        return []
 
-    selected_clips = manifest["selected_clips"]
-    print(f"[videos] Processing {len(selected_clips)} selected clips → {vid_out}")
+    print(f"[videos] Processing ALL {len(all_clips)} sequences → {vid_out}")
 
     data_path = Path(cfg["data_path"])
     scale     = float(cfg.get("scale", 1.0))
@@ -275,14 +278,14 @@ def process_videos(cfg: dict, output_path: Path) -> list:
     results = []
     t_start = time.time()
 
-    for i, clip_name in enumerate(selected_clips):
+    for i, clip_name in enumerate(all_clips):
         seq_dir = dataset_path / "sequences" / clip_name
 
         if not seq_dir.exists():
             print(f"  [skip] Sequence folder not found: {seq_dir}")
             continue
 
-        print(f"\n[{i+1}/{len(selected_clips)}] {clip_name}")
+        print(f"\n[{i+1}/{len(all_clips)}] {clip_name}")
 
         # Assemble frames → temp input video
         tmp_input = tmp_dir / f"{clip_name}.mp4"

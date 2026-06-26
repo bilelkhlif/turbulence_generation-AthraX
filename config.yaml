@@ -22,10 +22,11 @@ dataset_path: "./dataset/visdrone_vid_val"
 # e.g. "/root/rclone_mount/turbulence_outputs"
 output_path: "./outputs"
 
-# ── Dataset subset selection ──────────────────────────────────────
-# Fraction of sequences to keep from the VID valset.
-# Sequences are selected for maximum diversity (not just the first N%).
-subset_fraction: 0.30
+# ── Dataset ───────────────────────────────────────────────────────
+# subset_fraction is kept at 1.0 — the full dataset is always processed.
+# select_diverse_clips.py is no longer used; run_batch.py iterates over
+# all sequences directly.
+subset_fraction: 1.0
 
 # ── Turbulence physics ─────────────────────────────────────────────
 # D/r0 ratio — primary turbulence strength dial.

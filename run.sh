@@ -3,26 +3,23 @@
 # run.sh — one-shot setup + inference for TurbulenceSimulatorPython
 # Designed for a fresh Ubuntu / Vast.ai GPU instance.
 #
-# Pipeline (6 steps):
+# Pipeline (5 steps):
 #   1. Install dependencies (PyTorch CUDA build auto-selected)
 #   2. Verify model artefacts (P2S_model.pt, dictionary.npy)
 #   3a. Download VisDrone2019-DET-val images automatically (~70 MB, public mirror)
 #   3b. Pull VisDrone2019-VID-val videos via rclone from Google Drive
 #       (requires user to upload zip to gdrive:visdrone/ first)
-#   4. Select a diverse 30% clip subset using annotation metadata (videos only)
-#   5a. Apply turbulence to images  → run_batch.py  (per-image)
-#   5b. Apply turbulence to videos  → run_batch.py  (per-frame via apply_turbulence_to_video.py)
-#   6. All outputs saved to output_path from config.yaml
+#   4. Apply turbulence to ALL images and ALL video sequences
+#   5. All outputs saved to output_path from config.yaml
 #
 # Usage:
-#   bash run.sh [--config <path>] [--skip-install] [--skip-dataset] [--skip-select]
+#   bash run.sh [--config <path>] [--skip-install] [--skip-dataset]
 #               [--images-only] [--videos-only]
 #
 # Flags:
 #   --config <path>   Path to config YAML              (default: config.yaml)
 #   --skip-install    Skip pip install                  (env already set up)
 #   --skip-dataset    Skip dataset download             (datasets already present)
-#   --skip-select     Skip diversity selection          (manifest already exists)
 #   --images-only     Only process the image pipeline
 #   --videos-only     Only process the video pipeline
 # =============================================================================
@@ -32,7 +29,6 @@ set -euo pipefail
 CONFIG="config.yaml"
 SKIP_INSTALL=false
 SKIP_DATASET=false
-SKIP_SELECT=false
 IMAGES_ONLY=false
 VIDEOS_ONLY=false
 
@@ -41,7 +37,6 @@ while [[ $# -gt 0 ]]; do
     --config)        CONFIG="$2"; shift 2 ;;
     --skip-install)  SKIP_INSTALL=true; shift ;;
     --skip-dataset)  SKIP_DATASET=true; shift ;;
-    --skip-select)   SKIP_SELECT=true; shift ;;
     --images-only)   IMAGES_ONLY=true; shift ;;
     --videos-only)   VIDEOS_ONLY=true; shift ;;
     *) echo "[warn] Unknown flag: $1"; shift ;;
@@ -68,7 +63,7 @@ echo "============================================================"
 # STEP 1 — Install dependencies
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[1/6] Dependencies"
+echo "[1/5] Dependencies"
 
 if [ "$SKIP_INSTALL" = false ]; then
   if command -v nvidia-smi &>/dev/null; then
@@ -96,7 +91,7 @@ fi
 # STEP 2 — Verify model artefacts
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[2/6] Model artefacts"
+echo "[2/5] Model artefacts"
 
 DATA_PATH=$(_cfg "data_path" "./data")
 
@@ -124,7 +119,7 @@ echo "      dictionary.npy ✓"
 # STEP 3a — Download VisDrone2019-DET-val images (automatic, public mirror)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[3a/6] VisDrone2019-DET-val images (automatic download)"
+echo "[3a/5] VisDrone2019-DET-val images (automatic download)"
 
 DET_DATASET_PATH=$(_cfg "dataset_det_path" "./dataset/visdrone_det_val")
 
@@ -150,7 +145,7 @@ fi
 # STEP 3b — Pull VisDrone2019-VID-val videos via rclone (or instruct user)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[3b/6] VisDrone2019-VID-val videos (rclone from Google Drive)"
+echo "[3b/5] VisDrone2019-VID-val videos (rclone from Google Drive)"
 
 VID_DATASET_PATH=$(_cfg "dataset_path" "./dataset/visdrone_vid_val")
 VID_ZIP_NAME="VisDrone2019-VID-val.zip"
@@ -169,7 +164,6 @@ if [ "$SKIP_DATASET" = false ] && [ "$IMAGES_ONLY" = false ]; then
     echo "  Continuing with image pipeline only."
     IMAGES_ONLY=true
   else
-    # Check whether the zip exists in gdrive:visdrone/
     echo "      Checking ${GDRIVE_ZIP} …"
     if rclone lsf "$GDRIVE_ZIP" &>/dev/null 2>&1; then
       echo "      Found — pulling via rclone …"
@@ -202,10 +196,8 @@ if [ "$SKIP_DATASET" = false ] && [ "$IMAGES_ONLY" = false ]; then
       echo "  │  and add a remote named 'gdrive' pointing to your Google Drive.     │"
       echo "  └──────────────────────────────────────────────────────────────────────┘"
       echo ""
-      if [ "$IMAGES_ONLY" = false ]; then
-        echo "  Continuing with image pipeline only."
-        IMAGES_ONLY=true
-      fi
+      echo "  Continuing with image pipeline only."
+      IMAGES_ONLY=true
     fi
   fi
 
@@ -224,36 +216,10 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 4 — Diversity-based clip selection (videos only)
+# STEP 4 — Batch turbulence inference (ALL images + ALL video sequences)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[4/6] Clip selection (video sequences)"
-
-MANIFEST="$(dirname "$VID_DATASET_PATH")/selected_clips.json"
-FRACTION=$(_cfg "subset_fraction" "0.30")
-
-if [ "$IMAGES_ONLY" = true ]; then
-  echo "      Skipped (images-only mode)."
-elif [ "$SKIP_SELECT" = false ]; then
-  python3 select_diverse_clips.py \
-    --dataset  "$VID_DATASET_PATH" \
-    --fraction "$FRACTION" \
-    --out      "$MANIFEST"
-  echo "      ✓ Manifest written to $MANIFEST"
-else
-  echo "      Skipped (--skip-select)."
-  if [ ! -f "$MANIFEST" ]; then
-    echo "      [error] Manifest $MANIFEST not found. Remove --skip-select."
-    exit 1
-  fi
-  echo "      Using existing manifest: $MANIFEST"
-fi
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 5 — Batch turbulence inference (images + videos)
-# ══════════════════════════════════════════════════════════════════════════════
-echo ""
-echo "[5/6] Batch turbulence inference"
+echo "[4/5] Batch turbulence inference (full dataset — no subset selection)"
 
 OUTPUT_PATH=$(_cfg "output_path" "./outputs")
 mkdir -p "$OUTPUT_PATH"
@@ -268,14 +234,14 @@ fi
 python3 run_batch.py $BATCH_ARGS
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 6 — Done
+# STEP 5 — Done
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "[6/6] Complete"
+echo "[5/5] Complete"
 echo ""
 echo "============================================================"
 echo "  Done.  Outputs saved to: $OUTPUT_PATH"
-echo "    images/   — turbulence-degraded frames from DET-val"
-echo "    videos/   — turbulence-degraded clips from VID-val"
+echo "    images/   — all 548 turbulence-degraded DET-val images"
+echo "    videos/   — all VID-val sequences, turbulence-degraded"
 echo "  $(date)"
 echo "============================================================"
