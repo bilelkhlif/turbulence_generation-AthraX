@@ -13,11 +13,12 @@ Purdue University, West Lafayette, IN, USA
 
 from simulator import Simulator
 from turbStats import tilt_mat, corr_mat, get_r0
-import matplotlib.pyplot as plt
+import cv2
+import numpy as np
 import torch
 
 # Select device.
-device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('CPU')
+device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 
 
 '''
@@ -32,8 +33,12 @@ https://engineering.purdue.edu/ChanGroup/project_turbulence.html
 # Uncomment the following line to generate correlation matrix
 # corr_mat(-0.1,'./data/')
 
-# Load image, permute axis if color
-x = plt.imread('./images/color.png')
+# Load image, permute axis if color (headless — uses opencv, no GUI required)
+img_bgr = cv2.imread('./images/color.png')
+if img_bgr is None:
+    raise FileNotFoundError("Could not read ./images/color.png")
+# Convert BGR→RGB and normalise to [0, 1] float32
+x = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
 if len(x.shape) == 3: 
     x = x.transpose((2,0,1))
@@ -59,7 +64,8 @@ out = simulator(x).detach().cpu().numpy()
 if len(out.shape) == 3: 
     out = out.transpose((1,2,0))
 
-# save image
-plt.imsave('./images/out.png',out)
+# save image (headless — no plt.show() or display calls)
+out_uint8 = (np.clip(out, 0.0, 1.0) * 255).astype(np.uint8)
+cv2.imwrite('./images/out.png', cv2.cvtColor(out_uint8, cv2.COLOR_RGB2BGR))
 
 

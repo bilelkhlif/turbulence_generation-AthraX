@@ -1,5 +1,122 @@
 # Turbulence Generation — AthraX
 
+---
+
+## Run on Vast.ai
+
+This section covers running the full video pipeline fully headlessly on a [Vast.ai](https://vast.ai) GPU instance from scratch.
+
+### What it does
+
+The pipeline downloads the **VisDrone2019-VID validation set** (Task 2 — video sequences), selects a **diverse 30% subset** of clips using annotation metadata, applies atmospheric turbulence to every selected clip frame-by-frame, and saves the output videos to your configured output path (ready for rclone sync to Google Drive or similar).
+
+### Dataset
+
+- **VisDrone2019-VID valset** — 48 drone-captured video sequences (~1.49 GB zip)
+- Official Google Drive link from [VisDrone/VisDrone-Dataset](https://github.com/VisDrone/VisDrone-Dataset)
+- The diverse 30% subset (~14 clips) is selected automatically — see [Diversity selection](#diversity-selection) below.
+
+### 1. Rent an instance
+
+Pick any instance with:
+- At least **1 GPU** (RTX 3090 / A4000 or better recommended)
+- **Ubuntu 22.04** with CUDA pre-installed (e.g. `pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime`)
+- At least **30 GB disk** space (dataset + outputs)
+
+### 2. SSH in and clone
+
+```bash
+git clone https://github.com/bilelkhlif/turbulence_generation-AthraX.git
+cd turbulence_generation-AthraX
+```
+
+### 3. Add the model files
+
+The P2S pre-trained weights are not tracked in git. Place them in `data/`:
+
+```bash
+mkdir -p data
+# Copy from the original repo's data/ folder, or from your own storage:
+# cp /mnt/myremote/P2S_model.pt  data/
+# cp /mnt/myremote/dictionary.npy data/
+```
+
+> Source: [Riponcs/TurbulenceSimulatorPython](https://github.com/Riponcs/TurbulenceSimulatorPython) (`data/` folder) or the [authors' project page](https://engineering.purdue.edu/ChanGroup/project_turbulence.html).
+
+### 4. (Optional) Edit config
+
+Open `config.yaml` to adjust turbulence strength, output path, or clip fraction:
+
+```yaml
+output_path:      "./outputs"        # ← point to rclone mount if desired
+D_over_r0:        2.0                # turbulence strength
+subset_fraction:  0.30               # fraction of clips to process
+img_size:         256                # internal simulator resolution
+device:           "cuda"
+```
+
+### 5. Run everything
+
+```bash
+bash run.sh
+```
+
+That single command runs all five steps in order:
+
+| Step | What happens |
+|------|-------------|
+| 1 | Installs PyTorch (CUDA build auto-detected) + all other dependencies |
+| 2 | Checks that `P2S_model.pt` and `dictionary.npy` are present |
+| 3 | Downloads VisDrone2019-VID valset (~1.49 GB) via Google Drive |
+| 4 | Parses annotations and selects a diverse 30% clip subset |
+| 5 | Applies turbulence to each selected clip; saves to `outputs/` |
+
+A timing summary CSV is written to `outputs/results_summary.csv`.
+
+### Flags
+
+```bash
+bash run.sh --skip-install   # skip pip install (env already set up)
+bash run.sh --skip-dataset   # skip VisDrone download (already extracted)
+bash run.sh --skip-select    # skip diversity selection (manifest already exists)
+bash run.sh --config my.yaml # use a different config file
+```
+
+### Fast re-runs (after first successful run)
+
+```bash
+bash run.sh --skip-install --skip-dataset --skip-select
+```
+
+### Diversity selection
+
+Clips are **not** selected randomly. The script `select_diverse_clips.py` parses every annotation `.txt` file and computes these features per clip:
+
+| Feature | What it measures |
+|---------|-----------------|
+| Object density | Mean objects per frame — distinguishes sparse vs. crowded scenes |
+| Object scale | Mean bbox area / frame area — proxy for altitude / zoom level |
+| Person ratio | Fraction of pedestrian / people annotations — scene type signal |
+| Vehicle ratio | Fraction of vehicle annotations — urban vs. rural proxy |
+| Spatial spread | Mean centroid distance from frame centre — scene complexity |
+| Inverse length | Shorter clips score higher — keeps compute cost low |
+
+Selection uses a **greedy max-min distance** algorithm (Gonzalez) in the normalised 6-D feature space. This guarantees the chosen clips cover as much of the diversity space as possible rather than clustering in any one region.
+
+The selection manifest is saved to `dataset/selected_clips.json` so you can inspect or override it before running inference.
+
+### Apply turbulence to a custom video
+
+```bash
+python apply_turbulence_to_video.py \
+  --input  data/your_video.mp4 \
+  --output outputs/your_video_turbulent.mp4 \
+  --D 0.1 --r0 0.05 \
+  --img_size 256 --corr -0.1 --scale 1.0 --L 3000
+```
+
+---
+
 A tool for adding physically accurate atmospheric turbulence to video, built on top of the P2S (Phase-to-Space) simulator from Mao et al., ICCV 2021. It includes a Streamlit interface for running and benchmarking different turbulence configurations without touching the command line.
 
 ---

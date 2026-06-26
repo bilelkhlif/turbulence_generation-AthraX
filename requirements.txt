@@ -1,0 +1,26 @@
+# TurbulenceSimulatorPython — requirements
+# Install with:  pip install -r requirements.txt
+#
+# PyTorch is NOT listed here because the correct index URL depends on your
+# CUDA version.  run.sh installs it automatically.  For manual install:
+#   CUDA 12.x:  pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+#   CPU only:   pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cpu
+
+# Image / video processing
+opencv-python-headless==4.9.0.80
+
+# Scientific computing
+numpy==1.26.4
+scipy==1.13.1
+
+# Config parsing
+PyYAML==6.0.1
+
+# Google Drive download helper (for dataset)
+gdown==5.2.0
+
+# Progress bars
+tqdm==4.66.4
+
+# Streamlit (optional — only needed for the web UI, not for headless runs)
+streamlit==1.35.0
